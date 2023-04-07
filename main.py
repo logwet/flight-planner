@@ -4,6 +4,7 @@ import time
 import urllib.parse
 from datetime import date
 from itertools import permutations
+from multiprocessing import Pool
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -11,8 +12,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.wait import WebDriverWait
-
-from multiprocessing import Pool
 
 
 def td(x) -> datetime.timedelta:
@@ -24,8 +23,12 @@ NUMBER_OF_PEOPLE = 4
 START_DATE = datetime.date(2023, 11, 18)
 END_DATE = datetime.date(2024, 1, 21)
 SEARCH_DATE = START_DATE + td(7)
-LATEST_LEAVE_DELAY = 21
+LATEST_LEAVE_DELAY = 60
+PARALLELISATION = 16
+DRIVER_TIMEOUT = 25
 
+MASTER_ORIGIN_CITY = "Melbourne"
+DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 7)}
 
 def urlify(s: str) -> str:
     return urllib.parse.quote(s.encode('utf8'))
@@ -37,42 +40,38 @@ def _get_search_url(origin: str, destination: str) -> str:
 
 
 def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], dict[date, int]]:
-    driverOptions = Options()
-    # driverOptions.add_argument('--headless')
+    print("Scraping for ", origin, "to", destination)
+
+    driver_options = Options()
+    driver_options.add_argument("--headless=new")
     driver = webdriver.Remote(
         command_executor='http://127.0.0.1:4444/wd/hub',
         desired_capabilities={'browserName': 'chrome', 'javascriptEnabled': True},
-        options=driverOptions)
+        options=driver_options)
     driver.maximize_window()
-
-    driver.get(_get_search_url(origin, destination))
-
-    actions = ActionChains(driver)
-
-    element = WebDriverWait(driver, 5).until(
-        EC.element_to_be_clickable((By.XPATH, "//div[2]/div[2]/div/div/div[2]/button/div")))
-    actions.move_to_element(element).click().perform()
 
     data: dict[datetime.date, int] = {}
 
     def _scrape():
-        WebDriverWait(driver, 5).until(
+        WebDriverWait(driver, DRIVER_TIMEOUT).until(
             EC.visibility_of_element_located((By.CSS_SELECTOR, "g[series-id='price graph']")))
-        element = WebDriverWait(driver, 5).until(
+        element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
             lambda x: x.find_element(By.CSS_SELECTOR, "g[series-id='price graph']"))
 
-        WebDriverWait(driver, 5).until(lambda x: len(x.find_elements(By.CLASS_NAME, "ZMv3u")) > 10)
-        time.sleep(5)
+        WebDriverWait(driver, DRIVER_TIMEOUT).until(lambda x: len(x.find_elements(By.CLASS_NAME, "ZMv3u")) > 10)
+        time.sleep(max(DRIVER_TIMEOUT, 10))
         children = element.find_elements(By.CLASS_NAME, "ZMv3u")
 
         for e in children:
             actions.move_to_element(e).click().perform()
-            WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, DRIVER_TIMEOUT).until(
                 EC.visibility_of_element_located((By.XPATH, "//span/div/div/div/div/div[3]/div")))
-            WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, "//div[3]/div[2]/span")))
-            date_element = WebDriverWait(driver, 5).until(
+            WebDriverWait(driver, DRIVER_TIMEOUT).until(
+                EC.visibility_of_element_located((By.XPATH, "//div[3]/div[2]/span")))
+            date_element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
                 lambda x: x.find_element(By.XPATH, "//span/div/div/div/div/div[3]/div"))
-            price_element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, "//div[3]/div[2]/span"))
+            price_element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
+                lambda x: x.find_element(By.XPATH, "//div[3]/div[2]/span"))
 
             date = datetime.datetime.strptime(date_element.text, "%a, %b %d").date()
             if date.month <= datetime.datetime.now().month:
@@ -87,34 +86,42 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
 
             data[date] = cost
 
-    _scrape()
+    try:
+        driver.get(_get_search_url(origin, destination))
 
-    element = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//span/div/div[2]/button/div[3]")))
-    actions.move_to_element(element).click().perform()
+        actions = ActionChains(driver)
 
-    _scrape()
+        element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
+            EC.element_to_be_clickable((By.XPATH, "//div[2]/div[2]/div/div/div[2]/button/div")))
+        actions.move_to_element(element).click().perform()
 
-    driver.quit()
+        _scrape()
 
-    return ((origin, destination), data)
+        element = WebDriverWait(driver, DRIVER_TIMEOUT).until(EC.element_to_be_clickable((By.XPATH, "//span/div/div[2]/button/div[3]")))
+        actions.move_to_element(element).click().perform()
+
+        _scrape()
+    except Exception as e:
+        print(origin, destination, e)
+    finally:
+        driver.quit()
+
+    return (origin, destination), data
 
 
 if __name__ == '__main__':
-    price_database: dict[tuple[str], dict[datetime.date, int]] = {}
+    price_database: dict[tuple[str, str], dict[datetime.date, int]] = {}
 
 
     def get_prices(origin: str, destination: str) -> dict[datetime.date, int]:
         return price_database[(origin, destination)]
 
+    routes = (tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
+              permutations(DESTINATION_CITIES.keys(), 3))
 
-    master_origin_city = "Melbourne"
-    destination_cities = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (3, 7)}
-    routes = (tuple([master_origin_city] + list(x) + [master_origin_city]) for x in
-              permutations(destination_cities.keys(), 3))
-
-    with Pool(8) as p:
+    with Pool(PARALLELISATION) as p:
         results = p.starmap(scrape_price_graph,
-                            set(permutations(list(destination_cities.keys()) + [master_origin_city], 2)))
+                            set(permutations(list(DESTINATION_CITIES.keys()) + [MASTER_ORIGIN_CITY], 2)))
         p.close()
         p.join()
         for identifier, results in results:
@@ -129,19 +136,27 @@ if __name__ == '__main__':
         for origin, destination in zip(route, route[1:]):
             all_costs: dict[datetime.date, int] = get_prices(origin, destination)
 
-            if origin in destination_cities:
-                latest_date = earliest_date + td(destination_cities[origin][1])
-                earliest_date = earliest_date + td(destination_cities[origin][0])
+            if len(all_costs) < 1:
+                print("No flights found for", origin, "->", destination)
+                continue
+
+            if origin in DESTINATION_CITIES:
+                latest_date = earliest_date + td(DESTINATION_CITIES[origin][1])
+                earliest_date = earliest_date + td(DESTINATION_CITIES[origin][0])
             else:
                 latest_date = earliest_date + td(LATEST_LEAVE_DELAY)
 
             flights_in_date_range = {date: cost for date, cost in all_costs.items() if
-                                     (date >= earliest_date and date <= latest_date)}
+                                     (earliest_date <= date <= latest_date)}
 
-            cheapest_date = min(flights_in_date_range, key=flights_in_date_range.get)
+            if len(flights_in_date_range) < 1:
+                print("No flights in date range for", origin, "->", destination)
+                continue
+
+            cheapest_date = min(flights_in_date_range.__reversed__(), key=flights_in_date_range.get)
             cheapest_cost = flights_in_date_range[cheapest_date]
 
-            print("Cheapest flight from", origin, "to", destination, "is on", cheapest_date.strftime("%d/%m/%Y"), "for",
+            print(origin, "->", destination, "at", cheapest_date.strftime("%d/%m/%Y"), "for",
                   cheapest_cost, "AUD")
 
             earliest_date = cheapest_date
