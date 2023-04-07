@@ -1,123 +1,106 @@
+import datetime
 import time
+import urllib.parse
 
-import selenium
 from selenium import webdriver
-
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.wait import WebDriverWait
 
-NUMBER_OF_PEOPLE=4
-TIME_BETWEEN_ACTIONS=0.1
+from typing import List, Tuple, Dict
+import re
+
+from itertools import permutations
+
+NUMBER_OF_PEOPLE = 4
+TIME_BETWEEN_ACTIONS = 0.1
+START_DATE = datetime.date(2023, 11, 18)
+LATEST_LEAVE_DELAY = 21
 
 driverOptions = Options()
 # driverOptions.add_argument('--headless')
-# driverOptions.add_argument("--window-size=1920,1080")
 
-# Setup chromedriver
 driver = webdriver.Chrome(options=driverOptions)
+driver.maximize_window()
 
-def _wait_for_element(name):
-    WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, name)))
-    WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, name)))
+price_database: Dict[Tuple[str], List[Tuple[datetime.date, int]]] = {}
 
-def click_thing(name):
-    # _wait_for_element(name)
-    WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, name))).click()
-    # element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, name))
-    # actions = ActionChains(driver)
-    # actions.move_to_element(element).click().perform()
-    time.sleep(TIME_BETWEEN_ACTIONS)
+def urlify(s: str) -> str:
+    return urllib.parse.quote(s.encode('utf8'))
 
-def send_text(name, text):
-    _wait_for_element(name)
-    element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, name))
+def _get_search_url(origin: str, destination: str, date: datetime.date) -> str:
+    return "https://www.google.com/travel/flights?q=" + urlify(
+        f"one way flights for {NUMBER_OF_PEOPLE} people from {origin} to {destination} on {date.strftime('%d/%m/%Y')}")
+
+def open_page(url):
+    driver.get(url)
+
+def td(x) -> datetime.timedelta:
+    return datetime.timedelta(days=x)
+
+def scrape_price_graph() -> List[Tuple[datetime.date, int]]:
     actions = ActionChains(driver)
-    actions.move_to_element(element).send_keys(text).perform()
-    WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, name).get_attribute('value') == text)
-    time.sleep(TIME_BETWEEN_ACTIONS)
 
-def send_keys(name, keys):
-    _wait_for_element(name)
-    element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, name))
-    actions = ActionChains(driver)
-    actions.move_to_element(element).send_keys(keys).perform()
-    time.sleep(TIME_BETWEEN_ACTIONS)
+    element = WebDriverWait(driver, 5).until(EC.element_to_be_clickable((By.XPATH, "//div[2]/div[2]/div/div/div[2]/button/div")))
+    actions.move_to_element(element).click().perform()
 
-# Open the page
-driver.get("https://www.google.com/travel/flights")
+    WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "g[series-id='price graph']")))
+    element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.CSS_SELECTOR, "g[series-id='price graph']"))
 
-# Click on type of flight
-click_thing("//span[2]")
+    WebDriverWait(driver, 5).until(lambda x: len(x.find_elements(By.CLASS_NAME, "ZMv3u")) > 10)
+    time.sleep(5)
+    children = element.find_elements(By.CLASS_NAME, "ZMv3u")
 
-# Select one way
-click_thing("//li[2]")
-time.sleep(3)
+    data = []
 
-# Click people
-click_thing("//div[2]/div/div/div/button/span/span")
+    for e in children:
+        actions.move_to_element(e).click().perform()
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, "//span/div/div/div/div/div[3]/div")))
+        WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, "//div[3]/div[2]/span")))
+        date_element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, "//span/div/div/div/div/div[3]/div"))
+        price_element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, "//div[3]/div[2]/span"))
 
-# Add num of people
-for i in range(NUMBER_OF_PEOPLE-1):
-    click_thing("//span[3]/button/div[3]")
+        date = datetime.datetime.strptime(date_element.text, "%a, %b %d").date()
+        if date.month <= datetime.datetime.now().month:
+            date = date.replace(year=datetime.datetime.now().year + 1)
+        else:
+            date = date.replace(year=datetime.datetime.now().year)
 
-# Click done
-click_thing("//div[2]/button/div")
+        # if date < START_DATE:
+        #     continue
 
-# Click on origin city input
-click_thing("//input")
+        cost = int(re.sub('\D', '', price_element.text))
 
-# Type in origin city
-send_text("//div[2]/div[2]/div/div/input", "new")
-send_keys("//div[2]/div[2]/div/div/input", Keys.ENTER)
+        data.append((date, cost))
 
-# Click on destination city input
-click_thing("//div[4]/div/div/div/div/div/input")
+    return data
 
-# Type in destination city
-send_text("//div[2]/div[2]/div/div/input", "jak")
-send_keys("//li/div[2]/div/div", Keys.ENTER)
+def get_prices(origin: str, destination: str, date: datetime.date) -> List[Tuple[datetime.date, int]]:
+    if (origin, destination) not in price_database:
+        open_page(_get_search_url(origin, destination, date))
+        price_database[(origin, destination)] = scrape_price_graph()
+    return price_database[(origin, destination)]
 
-# Click on departure date input
-click_thing("//div[2]/div[2]/div/div/div/div/div/div/div/div/div/input")
+origin_city = "Melbourne"
+destination_cities = {"Colombo": (5, 14), "Kuala Lumpur": (5, 14), "Bangkok": (3, 7)}
+routes = (tuple([origin_city] + list(x) + [origin_city]) for x in permutations(destination_cities.keys(), 3))
 
-# Type in departure date
-send_text("//div[2]/div/div[2]/div/div/div/div/input", "Jan 2 2024")
+for route in routes:
+    earliest_date = START_DATE
+    for origin, destination in zip(route, route[1:]):
+        print("Looking at airfares for ", origin, "to", destination)
+        all_costs: List[Tuple[datetime.date, int]] = get_prices(origin, destination, earliest_date)
+        print(all_costs)
 
-# Enter departure date
-send_keys("//div[2]/div/div[2]/div/div/div/div/input", Keys.ENTER)
+        if origin_city in destination_cities:
+            latest_date = earliest_date + td(destination_cities[origin_city][1])
+            earliest_date = earliest_date + td(destination_cities[origin_city][0])
+        else:
+            latest_date = earliest_date + td(LATEST_LEAVE_DELAY)
 
-# Save date
-click_thing("//div[3]/div/button/div[3]")
+        flights_in_date_range = [(date, cost) for date, cost in all_costs if (date >= earliest_date and date <= latest_date)]
+        print(flights_in_date_range)
 
-time.sleep(1)
-
-# Search flights
-click_thing("//div[2]/div/div/div[2]/div/button/div")
-
-time.sleep(1)
-
-# Open price graph
-click_thing("//div[2]/div/div/div[3]/button/div")
-
-time.sleep(1)
-
-WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.CSS_SELECTOR, "g[series-id='price graph']")))
-element = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.CSS_SELECTOR, "g[series-id='price graph']"))
-children = element.find_elements(By.CSS_SELECTOR, "*")
-actions = ActionChains(driver)
-for e in children:
-    actions.move_to_element(e).click().perform()
-    WebDriverWait(driver, 5).until(EC.visibility_of_element_located((By.XPATH, "//span/div/div/div/div/div[3]/div")))
-    t = WebDriverWait(driver, 5).until(lambda x: x.find_element(By.XPATH, "//span/div/div/div/div/div[3]/div"))
-    print(t.text)
-
-
-while True:
-    ...
-
-# # Close the browser
-# driver.quit()
+driver.quit()
