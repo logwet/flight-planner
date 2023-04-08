@@ -1,19 +1,20 @@
+import copy
 import datetime
 import re
+import sys
 import time
 import urllib.parse
-from itertools import permutations
+from itertools import permutations, starmap
 from multiprocessing import Pool
+from ast import literal_eval
+from typing import Generator, Callable
 
 from pathlib import Path
 import shelve
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.action_chains import ActionChains
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.support.wait import WebDriverWait
+if not sys.version_info >= (3, 9):
+    print("Python 3.9 or higher is required to run this script.")
+    exit(1)
 
 
 def td(x) -> datetime.timedelta:
@@ -25,10 +26,10 @@ NUMBER_OF_PEOPLE = 4
 START_DATE = datetime.date(2023, 11, 18)
 END_DATE = datetime.date(2024, 1, 21)
 SEARCH_DATE = START_DATE + td(7)
-LATEST_LEAVE_DELAY = 60
+LATEST_LEAVE_DELAY = 7
 PARALLELISATION = 16
 DRIVER_TIMEOUT = 25
-OLD_DATA = 8
+OLD_DATA = 24
 
 MASTER_ORIGIN_CITY = "Melbourne"
 DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 7), "Singapore": (5, 7)}
@@ -42,7 +43,7 @@ class ScrapedFlightData:
     def is_old(self):
         return datetime.datetime.now() - self.timestamp > datetime.timedelta(hours=OLD_DATA)
 
-    def get_flights(self) -> dict[datetime.date,int]:
+    def get_flights(self) -> dict[datetime.date, int]:
         return self.flights
 
     def get_flight(self, date: datetime.date) -> int:
@@ -65,6 +66,10 @@ class FlightDatabase:
     def set_flight(self, origin: str, destination: str, flights: dict[datetime.date, int]):
         self.shelf[repr((origin, destination))] = ScrapedFlightData(datetime.datetime.now(), flights)
 
+    def read_state(self) -> dict[tuple[str, str], dict[datetime.date, int]]:
+        return {literal_eval(k): copy.deepcopy(v.get_flights()) for k, v in self.shelf.items()}
+
+
 def urlify(s: str) -> str:
     return urllib.parse.quote(s.encode('utf8'))
 
@@ -75,6 +80,13 @@ def _get_search_url(origin: str, destination: str) -> str:
 
 
 def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], dict[datetime.date, int]]:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.common.action_chains import ActionChains
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.wait import WebDriverWait
+
     print("Scraping for ", origin, "to", destination)
 
     driver_options = Options()
@@ -142,73 +154,110 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
     finally:
         driver.quit()
 
-    data = dict(sorted(data.items().__reversed__(), key=lambda flight: flight[1]))
+    data = dict(sorted(reversed(data.items()), key=lambda x: x[1]))
 
     return (origin, destination), data
 
 
-if __name__ == '__main__':
+class FinishedRouteException(Exception):
+    ...
+
+
+def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[datetime.date, int]],
+                                    route: tuple[str, ...]) -> \
+        dict[tuple[str, str], tuple[datetime.date, int]]:
+    flights: dict[tuple[str, str], tuple[datetime.date, int]] = {}
+
+    # noinspection PyTypeChecker
+    get_legs: Callable[[], Generator[tuple[str, str], None, None]] = lambda: zip(route, route[1:])
+
+    first_leg = next(get_legs())
+
+    # noinspection PyTypeChecker
+    flight_db[first_leg] = dict(sorted(reversed(flight_db[first_leg].items()), key=lambda x: x[1]))
+
+    flight_generators: dict[tuple[str, str], Generator[(datetime.date, int), None, None]] = {
+        i: ((dc) for dc in flight_db[i].items()) for i in get_legs()}
+
+    def step(leg_generator: Generator[tuple[str, str], None, None], start_date: datetime.date) -> bool:
+        try:
+            i = next(leg_generator)
+        except StopIteration:
+            raise FinishedRouteException
+
+        o, d = i
+
+        if o in DESTINATION_CITIES:
+            end_date = start_date + td(DESTINATION_CITIES[o][1])
+            start_date = start_date + td(DESTINATION_CITIES[o][0])
+        else:
+            end_date = start_date + td(LATEST_LEAVE_DELAY)
+
+        try:
+            while (flight := next(flight_generators[i]))[0] < start_date or flight[0] > end_date:
+                pass
+        except StopIteration:
+            return False
+
+        if flight[0] < start_date or flight[0] > end_date:
+            return False
+
+        start_date = flight[0]
+
+        flights[i] = flight
+
+        while not step(leg_generator, start_date):
+            pass
+
+        return True
+
+    try:
+        # noinspection PyTypeChecker
+        step(get_legs(), START_DATE)
+    except FinishedRouteException:
+        pass
+
+    return flights
+
+
+def main():
     Path("data").mkdir(parents=True, exist_ok=True)
     with shelve.open("data/flights", "c") as shelf:
         flight_db = FlightDatabase(shelf)
 
         unscraped_flights = set(
-            (o, d) for o, d in permutations(list(DESTINATION_CITIES.keys()) + [MASTER_ORIGIN_CITY], 2) if
-            flight_db.get_flight(o, d).is_old())
+            i for i in permutations(list(DESTINATION_CITIES.keys()) + [MASTER_ORIGIN_CITY], 2) if
+            flight_db.get_flight(*i).is_old())
 
         print("Unscraped flights:", unscraped_flights)
 
-        with Pool(PARALLELISATION) as p:
-            results = p.starmap(scrape_price_graph, unscraped_flights)
-            p.close()
-            p.join()
-            for (origin, destination), result in results:
-                flight_db.set_flight(origin, destination, result)
+        with Pool(PARALLELISATION) as pool:
+            results = pool.starmap(scrape_price_graph, unscraped_flights)
+            pool.close()
+            pool.join()
 
-        routes = (tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
-                  permutations(DESTINATION_CITIES.keys()))
+        for (origin, destination), result in results:
+            flight_db.set_flight(origin, destination, result)
 
-        route_costs: dict[tuple[str], int] = {}
+        flight_db_state = flight_db.read_state()
 
-        for route in routes:
-            earliest_date = START_DATE
-            total_cost = 0
-            last_leg_cheapest_flights = {}
+    routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
+              permutations(DESTINATION_CITIES.keys())]
 
-            for origin, destination in zip(route, route[1:]):
-                all_costs: ScrapedFlightData = flight_db.get_flight(origin, destination)
+    cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(zip(routes, starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
+    def cost_of_route(x: dict[tuple[str, str], tuple[datetime.date, int]]):
+        return sum(y[1] for y in x.values())
 
-                if len(all_costs) < 1:
-                    print("No flights found for", origin, "->", destination)
-                    continue
+    for route, flights in cheap_flights.items():
+        print("Route", route, "for", cost_of_route(flights), "AUD")
+        for (o, d), (date, cost) in flights.items():
+            print(o, "->", d, "on", date, "for", cost, "AUD")
+        print()
 
-                if origin in DESTINATION_CITIES:
-                    latest_date = earliest_date + td(DESTINATION_CITIES[origin][1])
-                    earliest_date = earliest_date + td(DESTINATION_CITIES[origin][0])
-                else:
-                    latest_date = earliest_date + td(LATEST_LEAVE_DELAY)
+    cheapest_route, cheapest_flights = min(cheap_flights.items(), key=lambda x: cost_of_route(x[1]))
 
-                flights_in_date_range = {date: cost for date, cost in all_costs.items() if
-                                         (earliest_date <= date <= latest_date)}
+    print("Cheapest route is", cheapest_route, "for", cost_of_route(cheapest_flights), "AUD")
 
-                if len(flights_in_date_range) < 1:
-                    print("No flights in date range for", origin, "->", destination)
-                    continue
 
-                cheapest_date = min(flights_in_date_range.__reversed__(), key=flights_in_date_range.get)
-
-                cheapest_cost = flights_in_date_range[cheapest_date]
-
-                print(origin, "->", destination, "at", cheapest_date.strftime("%d/%m/%Y"), "for",
-                      cheapest_cost, "AUD")
-
-                earliest_date = cheapest_date
-                total_cost += cheapest_cost
-
-            route_costs[route] = total_cost
-            print("Total cost for", route, "route is", total_cost, "AUD")
-
-        cheapest_route = min(route_costs, key=route_costs.get)
-        cheapest_route_cost = route_costs[cheapest_route]
-
-        print("Cheapest route is", cheapest_route, "for", cheapest_route_cost, "AUD")
+if __name__ == '__main__':
+    main()
