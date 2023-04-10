@@ -1,16 +1,15 @@
 import copy
 import datetime
 import re
+import shelve
 import sys
 import time
 import urllib.parse
+from ast import literal_eval
 from itertools import permutations, starmap
 from multiprocessing import Pool
-from ast import literal_eval
-from typing import Generator, Callable
-
 from pathlib import Path
-import shelve
+from typing import Generator, Callable
 
 if not sys.version_info >= (3, 9):
     print("Python 3.9 or higher is required to run this script.")
@@ -29,13 +28,13 @@ SEARCH_DATE = START_DATE + td(7)
 LATEST_LEAVE_DELAY = 7
 PARALLELISATION = 16
 DRIVER_TIMEOUT = 25
-OLD_DATA = 24
+OLD_DATA = 72
 
 MASTER_ORIGIN_CITY = "Melbourne"
 DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 7), "Singapore": (5, 7)}
 
 
-class ScrapedFlightData:
+class FlightData:
     def __init__(self, timestamp: datetime.datetime, flights: dict[datetime.date, int]):
         self.timestamp: datetime.datetime = timestamp
         self.flights: dict[datetime.date, int] = flights
@@ -60,11 +59,11 @@ class FlightDatabase:
     def __init__(self, shelf: shelve.Shelf):
         self.shelf: shelve.Shelf = shelf
 
-    def get_flight(self, origin: str, destination: str) -> ScrapedFlightData:
-        return self.shelf.get(repr((origin, destination)), default=ScrapedFlightData(datetime.datetime.min, {}))
+    def get_flight(self, origin: str, destination: str) -> FlightData:
+        return self.shelf.get(repr((origin, destination)), default=FlightData(datetime.datetime.min, {}))
 
     def set_flight(self, origin: str, destination: str, flights: dict[datetime.date, int]):
-        self.shelf[repr((origin, destination))] = ScrapedFlightData(datetime.datetime.now(), flights)
+        self.shelf[repr((origin, destination))] = FlightData(datetime.datetime.now(), flights)
 
     def read_state(self) -> dict[tuple[str, str], dict[datetime.date, int]]:
         return {literal_eval(k): copy.deepcopy(v.get_flights()) for k, v in self.shelf.items()}
@@ -86,6 +85,7 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support import expected_conditions as EC
     from selenium.webdriver.support.wait import WebDriverWait
+    from selenium.common.exceptions import TimeoutException
 
     print("Scraping for ", origin, "to", destination)
 
@@ -106,41 +106,56 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
             lambda x: x.find_element(By.CSS_SELECTOR, "g[series-id='price graph']"))
 
         WebDriverWait(driver, DRIVER_TIMEOUT).until(lambda x: len(x.find_elements(By.CLASS_NAME, "ZMv3u")) > 10)
-        time.sleep(max(DRIVER_TIMEOUT, 10))
+        time.sleep(max(DRIVER_TIMEOUT, 5))
         children = element.find_elements(By.CLASS_NAME, "ZMv3u")
 
         for e in children:
-            actions.move_to_element(e).click().perform()
-            WebDriverWait(driver, DRIVER_TIMEOUT).until(
-                EC.visibility_of_element_located((By.XPATH, "//span/div/div/div/div/div[3]/div")))
-            WebDriverWait(driver, DRIVER_TIMEOUT).until(
-                EC.visibility_of_element_located((By.XPATH, "//div[3]/div[2]/span")))
-            date_element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
-                lambda x: x.find_element(By.XPATH, "//span/div/div/div/div/div[3]/div"))
-            price_element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
-                lambda x: x.find_element(By.XPATH, "//div[3]/div[2]/span"))
+            try:
+                actions.move_to_element(e).click().perform()
+                WebDriverWait(driver, DRIVER_TIMEOUT).until(
+                    EC.visibility_of_element_located((By.XPATH, "//span/div/div/div/div/div[3]/div")))
+                WebDriverWait(driver, DRIVER_TIMEOUT).until(
+                    EC.visibility_of_element_located((By.XPATH, "//div[3]/div[2]/span")))
+                date_element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
+                    lambda x: x.find_element(By.XPATH, "//span/div/div/div/div/div[3]/div"))
+                price_element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
+                    lambda x: x.find_element(By.XPATH, "//div[3]/div[2]/span"))
 
-            date = datetime.datetime.strptime(date_element.text, "%a, %b %d").date()
-            if date.month <= datetime.datetime.now().month:
-                date = date.replace(year=datetime.datetime.now().year + 1)
-            else:
-                date = date.replace(year=datetime.datetime.now().year)
+                if date_element.text:
+                    date = datetime.datetime.strptime(date_element.text, "%a, %b %d").date()
+                    if date.month <= datetime.datetime.now().month:
+                        date = date.replace(year=datetime.datetime.now().year + 1)
+                    else:
+                        date = date.replace(year=datetime.datetime.now().year)
 
-            if date < START_DATE or date > END_DATE or date in data:
+                    if date < START_DATE or date > END_DATE or date in data:
+                        continue
+
+                    raw_cost = re.sub('\D', '', price_element.text)
+
+                    if raw_cost and (cost := int(raw_cost)) > 0:
+                        data[date] = cost
+            except Exception as e:
+                print("Error scraping date in price graph", e)
                 continue
-
-            cost = int(re.sub('\D', '', price_element.text))
-
-            data[date] = cost
 
     try:
         driver.get(_get_search_url(origin, destination))
 
+        time.sleep(3)
+
         actions = ActionChains(driver)
 
-        element = WebDriverWait(driver, DRIVER_TIMEOUT).until(
-            EC.element_to_be_clickable((By.XPATH, "//div[2]/div[2]/div/div/div[2]/button/div")))
+        try:
+            element = WebDriverWait(driver, min(DRIVER_TIMEOUT, 5)).until(
+                EC.element_to_be_clickable((By.XPATH, "//div[2]/div/div/div[3]/button/div")))
+        except TimeoutException:
+            element = WebDriverWait(driver, min(DRIVER_TIMEOUT, 5)).until(
+                EC.element_to_be_clickable((By.XPATH, "//div[2]/div[2]/div/div/div[2]/button/div")))
+
         actions.move_to_element(element).click().perform()
+
+        time.sleep(3)
 
         _scrape()
 
@@ -150,13 +165,15 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
 
         _scrape()
     except Exception as e:
-        print(origin, destination, e)
+        print("Error scraping", origin, destination, e)
     finally:
         driver.quit()
 
     data = dict(sorted(reversed(data.items()), key=lambda x: x[1]))
 
-    return (origin, destination), data
+    if (len(data) > 0):
+        return (origin, destination), data
+    return (None, None), None
 
 
 class FinishedRouteException(Exception):
@@ -222,7 +239,7 @@ def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[dateti
 
 def main():
     Path("data").mkdir(parents=True, exist_ok=True)
-    with shelve.open("data/flights", "c") as shelf:
+    with shelve.open("data/cached_flight_data", "c") as shelf:
         flight_db = FlightDatabase(shelf)
 
         unscraped_flights = set(
@@ -237,6 +254,7 @@ def main():
             pool.join()
 
         for (origin, destination), result in results:
+            if result is None: continue
             flight_db.set_flight(origin, destination, result)
 
         flight_db_state = flight_db.read_state()
@@ -244,7 +262,9 @@ def main():
     routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
               permutations(DESTINATION_CITIES.keys())]
 
-    cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(zip(routes, starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
+    cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(
+        zip(routes, starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
+
     def cost_of_route(x: dict[tuple[str, str], tuple[datetime.date, int]]):
         return sum(y[1] for y in x.values())
 
