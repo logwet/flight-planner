@@ -6,8 +6,8 @@ import sys
 import time
 import urllib.parse
 from ast import literal_eval
-from itertools import permutations, starmap
-from multiprocessing import Pool
+from itertools import permutations
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
 from typing import Iterator
 
@@ -26,21 +26,24 @@ START_DATE = datetime.date(2023, 11, 18)
 END_DATE = datetime.date(2024, 1, 21)
 SEARCH_DATE = START_DATE + td(7)
 LATEST_LEAVE_DELAY = (END_DATE - START_DATE).days
-PARALLELISATION = 16
+PARALLELISATION = cpu_count()
 DRIVER_TIMEOUT = 25
 OLD_DATA = 72
 
 MASTER_ORIGIN_CITY = "Melbourne"
-DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 7), "Singapore": (5, 7)}
+DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 14), "Singapore": (5, 14)}
 
 
 class FlightData:
-    def __init__(self, timestamp: datetime.datetime, flights: dict[datetime.date, int]):
+    def __init__(self, timestamp: datetime.datetime, num_people: int, flights: dict[datetime.date, int]):
         self.timestamp: datetime.datetime = timestamp
+        self.num_people = num_people
         self.flights: dict[datetime.date, int] = flights
 
     def should_be_rescraped(self):
-        return self.flights and datetime.datetime.now() - self.timestamp > datetime.timedelta(hours=OLD_DATA)
+        return (
+            not self.flights) or self.num_people != NUMBER_OF_PEOPLE or datetime.datetime.now() - self.timestamp > datetime.timedelta(
+            hours=OLD_DATA)
 
     def get_flights(self) -> dict[datetime.date, int]:
         return self.flights
@@ -60,10 +63,11 @@ class FlightDatabase:
         self.shelf: shelve.Shelf = shelf
 
     def get_flight(self, origin: str, destination: str) -> FlightData:
-        return self.shelf.get(repr((origin, destination)), default=FlightData(datetime.datetime.min, {}))
+        return self.shelf.get(repr((origin, destination)),
+                              default=FlightData(datetime.datetime.min, NUMBER_OF_PEOPLE, {}))
 
     def set_flight(self, origin: str, destination: str, flights: dict[datetime.date, int]):
-        self.shelf[repr((origin, destination))] = FlightData(datetime.datetime.now(), flights)
+        self.shelf[repr((origin, destination))] = FlightData(datetime.datetime.now(), NUMBER_OF_PEOPLE, flights)
 
     def read_state(self) -> dict[tuple[str, str], dict[datetime.date, int]]:
         return {literal_eval(k): copy.deepcopy(v.get_flights()) for k, v in self.shelf.items()}
@@ -93,7 +97,7 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
     from selenium.webdriver.support.wait import WebDriverWait
     from selenium.common.exceptions import TimeoutException
 
-    print("Scraping for ", origin, "to", destination)
+    print("Scraping for", origin, "to", destination)
 
     driver_options = Options()
     driver_options.add_argument("--headless=new")
@@ -289,21 +293,30 @@ def main():
     routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
               permutations(DESTINATION_CITIES.keys())]
 
-    cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(
-        zip(routes, starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
+    with Pool(PARALLELISATION) as pool:
+        cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(
+            zip(routes, pool.starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
+        pool.close()
+        pool.join()
 
     def cost_of_route(x: dict[tuple[str, str], tuple[datetime.date, int]]):
         return sum(y[1] for y in x.values())
 
-    for route, flights in cheap_flights.items():
-        print("Route", route, "for", cost_of_route(flights), "AUD")
+    def print_info(route: tuple[str, ...], flights: dict[tuple[str, str], tuple[datetime.date, int]], s=True):
+        if s: print("Route", route, "for", cost_of_route(flights), "AUD")
         for (o, d), (date, cost) in flights.items():
             print(o, "->", d, "on", date, "for", cost, "AUD")
         print()
 
+    for route, flights in cheap_flights.items():
+        print_info(route, flights)
+
+    cheapest_route: tuple[str, ...]
+    cheapest_flights: dict[tuple[str, str], tuple[datetime.date, int]]
     cheapest_route, cheapest_flights = min(cheap_flights.items(), key=lambda x: cost_of_route(x[1]))
 
     print("Cheapest route is", cheapest_route, "for", cost_of_route(cheapest_flights), "AUD")
+    print_info(cheapest_route, cheap_flights[cheapest_route], False)
 
 
 if __name__ == '__main__':
