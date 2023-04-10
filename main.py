@@ -9,7 +9,7 @@ from ast import literal_eval
 from itertools import permutations, starmap
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Generator, Callable
+from typing import Generator, Callable, Iterator
 
 if not sys.version_info >= (3, 9):
     print("Python 3.9 or higher is required to run this script.")
@@ -180,33 +180,36 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
     return (origin, destination), data
 
 
-class FinishedRouteException(Exception):
-    ...
-
-
 def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[datetime.date, int]],
                                     route: tuple[str, ...]) -> \
         dict[tuple[str, str], tuple[datetime.date, int]]:
+    class FlightException(Exception): ...
+    class FinishedRouteException(FlightException): ...
+
+    class NoFlightsFoundException(FlightException):
+        def __init__(self, leg: tuple[str, str]):
+            self.leg = leg
+
+        def __str__(self):
+            return f"No flights found for leg {self.leg}"
+
     flights: dict[tuple[str, str], tuple[datetime.date, int]] = {}
 
+    legs = tuple(zip(route, route[1:]))
+    num_legs = len(legs)
+    leg_indexes = {leg: i for i, leg in enumerate(legs)}
+
+    flight_db = {k: v for k, v in flight_db.items() if k in legs}
+
     # noinspection PyTypeChecker
-    get_legs: Callable[[], Generator[tuple[str, str], None, None]] = lambda: zip(route, route[1:])
+    flight_db[legs[0]] = dict(sorted(reversed(flight_db[legs[0]].items()), key=lambda x: x[1]))
 
-    first_leg = next(get_legs())
+    def get_iterator_for_flights_in_date_range(leg: tuple[str, str], start_date: datetime.date, end_date: datetime.date) -> Iterator[tuple[datetime.date, int]]:
+        # noinspection PyTypeChecker
+        return filter(lambda flight: start_date <= flight[0] <= end_date, flight_db[leg].items())
 
-    # noinspection PyTypeChecker
-    flight_db[first_leg] = dict(sorted(reversed(flight_db[first_leg].items()), key=lambda x: x[1]))
-
-    flight_generators: dict[tuple[str, str], Generator[(datetime.date, int), None, None]] = {
-        i: ((dc) for dc in flight_db[i].items()) for i in get_legs()}
-
-    def step(leg_generator: Generator[tuple[str, str], None, None], start_date: datetime.date) -> bool:
-        try:
-            i = next(leg_generator)
-        except StopIteration:
-            raise FinishedRouteException
-
-        o, d = i
+    def step(leg: tuple[str, str], start_date: datetime.date):
+        o, d = leg
 
         if o in DESTINATION_CITIES:
             end_date = start_date + td(DESTINATION_CITIES[o][1])
@@ -214,31 +217,32 @@ def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[dateti
         else:
             end_date = start_date + td(LATEST_LEAVE_DELAY)
 
-        try:
-            while (flight := next(flight_generators[i]))[0] < start_date or flight[0] > end_date:
-                pass
-        except StopIteration:
-            return False
+        iterator = get_iterator_for_flights_in_date_range(leg, start_date, end_date)
 
-        if flight[0] < start_date or flight[0] > end_date:
-            return False
+        next_leg_index = leg_indexes[leg] + 1
 
-        start_date = flight[0]
+        for date, cost in iterator:
+            if next_leg_index < num_legs:
+                try:
+                    step(legs[next_leg_index], date)
+                except NoFlightsFoundException:
+                    continue
+                except FinishedRouteException:
+                    flights[leg] = (date, cost)
+                    raise FinishedRouteException
+            else:
+                flights[leg] = (date, cost)
+                raise FinishedRouteException
 
-        flights[i] = flight
-
-        while not step(leg_generator, start_date):
-            pass
-
-        return True
+        raise NoFlightsFoundException(leg)
 
     try:
-        # noinspection PyTypeChecker
-        step(get_legs(), START_DATE)
-    except FinishedRouteException:
+        step(legs[0], START_DATE)
+    except FlightException:
         pass
 
-    return flights
+    # noinspection PyTypeChecker
+    return dict(reversed(flights.items()))
 
 
 def main():
