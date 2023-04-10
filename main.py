@@ -39,8 +39,8 @@ class FlightData:
         self.timestamp: datetime.datetime = timestamp
         self.flights: dict[datetime.date, int] = flights
 
-    def is_old(self):
-        return datetime.datetime.now() - self.timestamp > datetime.timedelta(hours=OLD_DATA)
+    def should_be_rescraped(self):
+        return self.flights and datetime.datetime.now() - self.timestamp > datetime.timedelta(hours=OLD_DATA)
 
     def get_flights(self) -> dict[datetime.date, int]:
         return self.flights
@@ -67,6 +67,12 @@ class FlightDatabase:
 
     def read_state(self) -> dict[tuple[str, str], dict[datetime.date, int]]:
         return {literal_eval(k): copy.deepcopy(v.get_flights()) for k, v in self.shelf.items()}
+
+    def del_flight(self, origin: str, destination: str):
+        try:
+            del self.shelf[repr((origin, destination))]
+        except KeyError:
+            pass
 
 
 def urlify(s: str) -> str:
@@ -171,9 +177,7 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
 
     data = dict(sorted(reversed(data.items()), key=lambda x: x[1]))
 
-    if (len(data) > 0):
-        return (origin, destination), data
-    return (None, None), None
+    return (origin, destination), data
 
 
 class FinishedRouteException(Exception):
@@ -244,7 +248,7 @@ def main():
 
         unscraped_flights = set(
             i for i in permutations(list(DESTINATION_CITIES.keys()) + [MASTER_ORIGIN_CITY], 2) if
-            flight_db.get_flight(*i).is_old())
+            flight_db.get_flight(*i).should_be_rescraped())
 
         print("Unscraped flights:", unscraped_flights)
 
@@ -254,7 +258,6 @@ def main():
             pool.join()
 
         for (origin, destination), result in results:
-            if result is None: continue
             flight_db.set_flight(origin, destination, result)
 
         flight_db_state = flight_db.read_state()
