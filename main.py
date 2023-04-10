@@ -9,7 +9,7 @@ from ast import literal_eval
 from itertools import permutations, starmap
 from multiprocessing import Pool
 from pathlib import Path
-from typing import Generator, Callable, Iterator
+from typing import Iterator
 
 if not sys.version_info >= (3, 9):
     print("Python 3.9 or higher is required to run this script.")
@@ -25,7 +25,7 @@ NUMBER_OF_PEOPLE = 4
 START_DATE = datetime.date(2023, 11, 18)
 END_DATE = datetime.date(2024, 1, 21)
 SEARCH_DATE = START_DATE + td(7)
-LATEST_LEAVE_DELAY = 7
+LATEST_LEAVE_DELAY = (END_DATE - START_DATE).days
 PARALLELISATION = 16
 DRIVER_TIMEOUT = 25
 OLD_DATA = 72
@@ -288,13 +288,6 @@ def main():
 
     routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
               permutations(DESTINATION_CITIES.keys())]
-
-    flight_db_state[("Colombo", "Singapore")] = {}
-    flight_db_state[("Bangkok", "Kuala Lumpur")][datetime.date(2023,12,31)] = 1
-    flight_db_state[("Kuala Lumpur", "Colombo")][datetime.date(2024,1,7)] = 1
-    flight_db_state[("Colombo", "Melbourne")][datetime.date(2024,1,14)] = 1
-
-
 
     cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(
         zip(routes, starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
