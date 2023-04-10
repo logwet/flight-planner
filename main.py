@@ -183,8 +183,15 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
 def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[datetime.date, int]],
                                     route: tuple[str, ...]) -> \
         dict[tuple[str, str], tuple[datetime.date, int]]:
-    class FlightException(Exception): ...
-    class FinishedRouteException(FlightException): ...
+    class FlightException(Exception):
+        ...
+
+    class FinishedRouteException(FlightException):
+        def __init__(self, total_cost):
+            self.total_cost = total_cost
+
+        def __str__(self):
+            return f"Finished route with cost {self.total_cost}"
 
     class NoFlightsFoundException(FlightException):
         def __init__(self, leg: tuple[str, str]):
@@ -197,49 +204,62 @@ def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[dateti
 
     legs = tuple(zip(route, route[1:]))
     num_legs = len(legs)
+    first_leg = legs[0]
     leg_indexes = {leg: i for i, leg in enumerate(legs)}
 
     flight_db = {k: v for k, v in flight_db.items() if k in legs}
 
     # noinspection PyTypeChecker
-    flight_db[legs[0]] = dict(sorted(reversed(flight_db[legs[0]].items()), key=lambda x: x[1]))
+    flight_db[first_leg] = dict(sorted(reversed(flight_db[first_leg].items()), key=lambda x: x[1]))
 
-    def get_iterator_for_flights_in_date_range(leg: tuple[str, str], start_date: datetime.date, end_date: datetime.date) -> Iterator[tuple[datetime.date, int]]:
+    def get_iterator_for_flights_in_date_range(leg: tuple[str, str], start_date: datetime.date,
+                                               end_date: datetime.date) -> Iterator[tuple[datetime.date, int]]:
         # noinspection PyTypeChecker
         return filter(lambda flight: start_date <= flight[0] <= end_date, flight_db[leg].items())
 
-    def step(leg: tuple[str, str], start_date: datetime.date):
-        o, d = leg
+    cost_of_cheapest_route_so_far: int = 2 ** 63 - 1
 
-        if o in DESTINATION_CITIES:
+    def step(leg: tuple[str, str], start_date: datetime.date, total_cost: int):
+        o, d = leg
+        next_leg_index = leg_indexes[leg] + 1
+
+        if leg == first_leg:
+            end_date = start_date + td(LATEST_LEAVE_DELAY)
+        else:
             end_date = start_date + td(DESTINATION_CITIES[o][1])
             start_date = start_date + td(DESTINATION_CITIES[o][0])
-        else:
-            end_date = start_date + td(LATEST_LEAVE_DELAY)
 
         iterator = get_iterator_for_flights_in_date_range(leg, start_date, end_date)
 
-        next_leg_index = leg_indexes[leg] + 1
-
         for date, cost in iterator:
+            new_total_cost = total_cost + cost
+
             if next_leg_index < num_legs:
                 try:
-                    step(legs[next_leg_index], date)
+                    step(legs[next_leg_index], date, new_total_cost)
                 except NoFlightsFoundException:
                     continue
                 except FinishedRouteException:
                     flights[leg] = (date, cost)
-                    raise FinishedRouteException
+                    raise FinishedRouteException(new_total_cost)
             else:
-                flights[leg] = (date, cost)
-                raise FinishedRouteException
+                nonlocal cost_of_cheapest_route_so_far
+                if new_total_cost < cost_of_cheapest_route_so_far:
+                    cost_of_cheapest_route_so_far = new_total_cost
+                    flights[leg] = (date, cost)
+                    raise FinishedRouteException(new_total_cost)
+                continue
 
         raise NoFlightsFoundException(leg)
 
-    try:
-        step(legs[0], START_DATE)
-    except FlightException:
-        pass
+    i = 0
+    while True:
+        try:
+            step(first_leg, START_DATE + td(i), 0)
+        except NoFlightsFoundException:
+            break
+        except FinishedRouteException:
+            i += 1
 
     # noinspection PyTypeChecker
     return dict(reversed(flights.items()))
@@ -268,6 +288,13 @@ def main():
 
     routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
               permutations(DESTINATION_CITIES.keys())]
+
+    flight_db_state[("Colombo", "Singapore")] = {}
+    flight_db_state[("Bangkok", "Kuala Lumpur")][datetime.date(2023,12,31)] = 1
+    flight_db_state[("Kuala Lumpur", "Colombo")][datetime.date(2024,1,7)] = 1
+    flight_db_state[("Colombo", "Melbourne")][datetime.date(2024,1,14)] = 1
+
+
 
     cheap_flights: dict[tuple[str, ...], dict[tuple[str, str], tuple[datetime.date, int]]] = dict(
         zip(routes, starmap(find_cheapest_flights_for_route, [(flight_db_state, x) for x in routes])))
