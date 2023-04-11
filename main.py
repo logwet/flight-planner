@@ -1,3 +1,19 @@
+# Flight Planner
+# Copyright (C) 2023 logwet
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 import copy
 import datetime
 import re
@@ -22,19 +38,47 @@ def td(x) -> datetime.timedelta:
     return datetime.timedelta(days=x)
 
 
-NUMBER_OF_PEOPLE = 4
-# TIME_BETWEEN_ACTIONS = 0.1
-START_DATE = datetime.date(2023, 11, 18)
-END_DATE = datetime.date(2024, 1, 21)
-SEARCH_DATE = START_DATE + td(7)
-LATEST_LEAVE_DELAY = (END_DATE - START_DATE).days
-PARALLELISATION = cpu_count()
-DRIVER_TIMEOUT = 25
-OLD_DATA = 24 * 7
+# ------ START CONFIGURATION SECTION ------
 
-MASTER_ORIGIN_CITY = "Melbourne"
-MASTER_DESTINATION_CITY = "Melbourne"
-DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 14), "Singapore": (5, 14)}
+# How many people are travelling
+NUMBER_OF_PEOPLE: int = 4
+
+# What date is the earliest you can fly out from your initial departure city
+# YYYY, MM, DD
+START_DATE: datetime.date = datetime.date(2023, 11, 18)
+
+# What date is the latest you can fly to your final destination on (ie. when do you need to return home by)
+# YYYY, MM, DD
+END_DATE: datetime.date = datetime.date(2024, 1, 21)
+
+# How late can you leave from your initial departure city?
+# By default this is right up until you want to get home
+LATEST_LEAVE_DELAY: int = (END_DATE - START_DATE).days
+
+# Number of hours to keep cached data for
+OLD_DATA: int = 24 * 7
+
+# What city are you departing from at the start of your trip
+MASTER_ORIGIN_CITY: str = "Melbourne"
+
+# What city are you ending up in at the end of your trip
+MASTER_DESTINATION_CITY: str = "Melbourne"
+
+# What cities are you visiting on the way, with the minimum and maximum number of days you want to spend in each city
+# "City Name": (minimum days, maximum days)
+DESTINATION_CITIES: dict[str, tuple[int, int]] = {
+    "Colombo": (7, 14),
+    "Kuala Lumpur": (7, 14),  # I want to spend at least a week in KL, but 2 is pushing it
+    "Bangkok": (5, 14),
+    "Singapore": (5, 14)
+}
+
+# ------ END CONFIGURATION SECTION ------
+
+# Only fiddle with these if you know what you're doing
+SEARCH_DATE = START_DATE + td(7)
+DRIVER_TIMEOUT = 25
+PARALLELISATION = max(cpu_count(), 16)
 
 
 class FlightData:
@@ -106,6 +150,7 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
     driver_options.add_argument("--headless=new")
     driver = webdriver.Remote(
         command_executor='http://127.0.0.1:4444/wd/hub',
+        # Edit this if you want to use a browser besides chrome
         desired_capabilities={'browserName': 'chrome', 'javascriptEnabled': True},
         options=driver_options)
     driver.maximize_window()
@@ -219,14 +264,14 @@ def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[dateti
     # noinspection PyTypeChecker
     flight_db[first_leg] = dict(sorted(reversed(flight_db[first_leg].items()), key=lambda x: x[1]))
 
-    def get_iterator_for_flights_in_date_range(leg: tuple[str, str], start_date: datetime.date,
-                                               end_date: datetime.date) -> Iterator[tuple[datetime.date, int]]:
+    def _flights_in_range_iterator(leg: tuple[str, str], start_date: datetime.date,
+                                   end_date: datetime.date) -> Iterator[tuple[datetime.date, int]]:
         # noinspection PyTypeChecker
         return filter(lambda flight: start_date <= flight[0] <= end_date, flight_db[leg].items())
 
     cost_of_cheapest_route_so_far: int = 2 ** 63 - 1
 
-    def step(leg: tuple[str, str], start_date: datetime.date, total_cost: int):
+    def _step(leg: tuple[str, str], start_date: datetime.date, total_cost: int):
         o, d = leg
         next_leg_index = leg_indexes[leg] + 1
 
@@ -236,14 +281,14 @@ def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[dateti
             end_date = start_date + td(DESTINATION_CITIES[o][1])
             start_date = start_date + td(DESTINATION_CITIES[o][0])
 
-        iterator = get_iterator_for_flights_in_date_range(leg, start_date, end_date)
+        iterator = _flights_in_range_iterator(leg, start_date, end_date)
 
         for date, cost in iterator:
             new_total_cost = total_cost + cost
 
             if next_leg_index < num_legs:
                 try:
-                    step(legs[next_leg_index], date, new_total_cost)
+                    _step(legs[next_leg_index], date, new_total_cost)
                 except NoFlightsFoundException:
                     continue
                 except FinishedRouteException:
@@ -262,7 +307,7 @@ def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[dateti
     i = 0
     while True:
         try:
-            step(first_leg, START_DATE + td(i), 0)
+            _step(first_leg, START_DATE + td(i), 0)
         except NoFlightsFoundException:
             break
         except FinishedRouteException:
@@ -315,9 +360,9 @@ def main():
         return sum(y[1] for y in x.values())
 
     def print_info(route: tuple[str, ...], flights: dict[tuple[str, str], tuple[datetime.date, int]], s=True):
-        if s: print("Route", route, "for", cost_of_route(flights), "AUD")
+        if s: print("Route", route, "for", cost_of_route(flights))
         for (o, d), (date, cost) in flights.items():
-            print(o, "->", d, "on", date, "for", cost, "AUD")
+            print(o, "->", d, "on", date, "for", cost)
         print()
 
     for route, flights in cheap_flights.items():
@@ -327,7 +372,7 @@ def main():
     cheapest_flights: dict[tuple[str, str], tuple[datetime.date, int]]
     cheapest_route, cheapest_flights = min(cheap_flights.items(), key=lambda x: cost_of_route(x[1]))
 
-    print("Cheapest route is", cheapest_route, "for", cost_of_route(cheapest_flights), "AUD")
+    print("Cheapest route is", cheapest_route, "for", cost_of_route(cheapest_flights))
     print_info(cheapest_route, cheap_flights[cheapest_route], False)
 
 
@@ -335,7 +380,7 @@ if __name__ == '__main__':
     selenium_server: subprocess.Popen = None
     try:
         main()
-    except:
+    finally:
         if selenium_server is not None:
             print("Closing Selenium Server")
             selenium_server.send_signal(signal.SIGINT)
