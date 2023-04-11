@@ -56,7 +56,7 @@ END_DATE: datetime.date = datetime.date(2024, 1, 21)
 LATEST_LEAVE_DELAY: int = (END_DATE - START_DATE).days
 
 # Number of hours to keep cached data for
-OLD_DATA: int = 24 * 7
+OLD_DATA: int = 24 * 3
 
 # What city are you departing from at the start of your trip
 MASTER_ORIGIN_CITY: str = "Melbourne"
@@ -135,6 +135,8 @@ def _get_search_url(origin: str, destination: str) -> str:
         f"one way flights for {NUMBER_OF_PEOPLE} people from {origin} to {destination} on {SEARCH_DATE.strftime('%d/%m/%Y')}")
 
 
+# Yes, I know using XPATH selectors is bad practice, but I'm lazy and this works.
+# If you want to fix it, go ahead, I would be more than happy to accept the PR!
 def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], dict[datetime.date, int]]:
     from selenium import webdriver
     from selenium.webdriver.chrome.options import Options
@@ -232,6 +234,7 @@ def scrape_price_graph(origin: str, destination: str) -> tuple[tuple[str, str], 
     return (origin, destination), data
 
 
+# I think there is a lot of room for optimization here but I'm pretty lazy
 def find_cheapest_flights_for_route(flight_db: dict[tuple[str, str], dict[datetime.date, int]],
                                     route: tuple[str, ...]) -> \
         dict[tuple[str, str], tuple[datetime.date, int]]:

@@ -29,7 +29,7 @@ See the [Requirements Section](#requirements)
 - It has only been tested in Australia and may very well not work in other countries. 
 - Scraping Google Flights takes a LONG time! Be prepared to wait a while.
 - The algorithm is not perfect, there is probably a cheaper route that exists. It is sufficient for my needs.
-- Because of ^, flights are cached after being scraped for up to a week (configurable). This means your first run of the script should be the longest but subsequent runs wont take as long.
+- Because of ^, flights are cached after being scraped for up to 3 days (configurable). This means your first run of the script should be the longest but subsequent runs wont take as long.
 - If you want to force a rescrape of cached data, delete the contents of `data/`
 - By default this script will launch as many parallel instances of chrome as you have CPU cores (capped to 16 so I don't DDOS Google), which will put considerable load on your internet connection and your RAM.
 - Currency is whatever currency Google Flights chooses to display in your locale
