@@ -2,6 +2,8 @@ import copy
 import datetime
 import re
 import shelve
+import signal
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -28,9 +30,10 @@ SEARCH_DATE = START_DATE + td(7)
 LATEST_LEAVE_DELAY = (END_DATE - START_DATE).days
 PARALLELISATION = cpu_count()
 DRIVER_TIMEOUT = 25
-OLD_DATA = 72
+OLD_DATA = 24 * 7
 
 MASTER_ORIGIN_CITY = "Melbourne"
+MASTER_DESTINATION_CITY = "Melbourne"
 DESTINATION_CITIES = {"Colombo": (7, 14), "Kuala Lumpur": (7, 14), "Bangkok": (5, 14), "Singapore": (5, 14)}
 
 
@@ -275,22 +278,31 @@ def main():
         flight_db = FlightDatabase(shelf)
 
         unscraped_flights = set(
-            i for i in permutations(list(DESTINATION_CITIES.keys()) + [MASTER_ORIGIN_CITY], 2) if
+            i for i in permutations(list(DESTINATION_CITIES.keys()) + [MASTER_ORIGIN_CITY, MASTER_DESTINATION_CITY], 2)
+            if
+            i not in ((MASTER_ORIGIN_CITY, MASTER_DESTINATION_CITY), (MASTER_DESTINATION_CITY, MASTER_ORIGIN_CITY)) and
             flight_db.get_flight(*i).should_be_rescraped())
 
-        print("Unscraped flights:", unscraped_flights)
+        if (len(unscraped_flights) > 0):
+            print("Unscraped flights:", unscraped_flights)
 
-        with Pool(PARALLELISATION) as pool:
-            results = pool.starmap(scrape_price_graph, unscraped_flights)
-            pool.close()
-            pool.join()
+            global selenium_server
+            selenium_server = subprocess.Popen(["java", "-jar", "bin/selenium-server-4.8.3.jar", "standalone"])
+            time.sleep(1)
 
-        for (origin, destination), result in results:
-            flight_db.set_flight(origin, destination, result)
+            with Pool(PARALLELISATION) as pool:
+                results = pool.starmap(scrape_price_graph, unscraped_flights)
+                pool.close()
+                pool.join()
+
+            selenium_server.send_signal(signal.SIGINT)
+
+            for (origin, destination), result in results:
+                flight_db.set_flight(origin, destination, result)
 
         flight_db_state = flight_db.read_state()
 
-    routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_ORIGIN_CITY]) for x in
+    routes = [tuple([MASTER_ORIGIN_CITY] + list(x) + [MASTER_DESTINATION_CITY]) for x in
               permutations(DESTINATION_CITIES.keys())]
 
     with Pool(PARALLELISATION) as pool:
@@ -320,4 +332,10 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    selenium_server: subprocess.Popen = None
+    try:
+        main()
+    except:
+        if selenium_server is not None:
+            print("Closing Selenium Server")
+            selenium_server.send_signal(signal.SIGINT)
