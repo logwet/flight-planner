@@ -2,6 +2,9 @@
 
 Python Script that scrapes [Google Flights](https://www.google.com/travel/flights) and runs a basic algorithm to determine an optimal (cheap) route between any number of destinations.
 
+![demo](img/demo.png)
+*Example output for 4 people to visit 4 countries. That's only $1,170.75 AUD per person!*
+
 ## Configuration
 
 Edit the parameters at the top of `main.py`
